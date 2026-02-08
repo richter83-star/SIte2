@@ -1,0 +1,507 @@
+// Dracanus AI Platform - Complete Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== AUTHENTICATION & USERS ====================
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  password      String?   // Hashed with bcrypt
+  emailVerified DateTime?
+  image         String?
+  role          UserRole  @default(USER)
+  
+  // Subscription info
+  subscriptionTier SubscriptionTier @default(FREE)
+  subscriptionStatus String?  // active, canceled, past_due
+  stripeCustomerId String?   @unique
+  stripeSubscriptionId String? @unique
+  subscriptionEndsAt DateTime?
+  
+  // Usage tracking
+  apiCallsThisMonth Int @default(0)
+  agentRunsThisMonth Int @default(0)
+  storageUsedMB Int @default(0)
+  
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastLoginAt DateTime?
+  
+  // Relations
+  accounts      Account[]
+  sessions      Session[]
+  deployments   Deployment[]
+  projects      Project[]
+  policies      Policy[]
+  executions    Execution[]
+  connections   Connection[]
+  blockedActions BlockedAction[]
+  
+  @@index([email])
+  @@index([stripeCustomerId])
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum SubscriptionTier {
+  FREE
+  PRO
+  AGENCY
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ==================== AGENTS ====================
+
+model Agent {
+  id          String      @id @default(cuid())
+  name        String
+  slug        String      @unique
+  description String
+  category    AgentCategory
+  
+  // Pricing & tier
+  pricePerMonth Int       // in cents
+  tier        Int         @default(1) // 1 = Free tier, 2 = Pro, 3 = Agency
+  
+  // Capabilities
+  capabilities String[]   // ["email", "research", "generate-content"]
+  systemPrompt String     // Instructions for this agent
+  modelPreference String  @default("ollama") // ollama, plus-coder, openai
+  
+  // Metadata
+  icon        String?
+  featured    Boolean     @default(false)
+  active      Boolean     @default(true)
+  deploymentCount Int     @default(0)
+  
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  
+  // Relations
+  deployments Deployment[]
+  executions  Execution[]
+  
+  @@index([category])
+  @@index([slug])
+}
+
+enum AgentCategory {
+  EMAIL
+  CALENDAR
+  RESEARCH
+  DOCUMENT
+  DATA
+  CODE
+  SUPPORT
+  WORKFLOW
+}
+
+model Deployment {
+  id        String   @id @default(cuid())
+  userId    String
+  agentId   String
+  projectId String?
+  
+  // Configuration
+  name      String?
+  config    Json?    // Agent-specific configuration
+  status    DeploymentStatus @default(ACTIVE)
+  
+  // Metadata
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastRunAt DateTime?
+  
+  // Relations
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent     Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  project   Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  executions Execution[]
+  
+  @@index([userId])
+  @@index([agentId])
+  @@index([projectId])
+}
+
+enum DeploymentStatus {
+  ACTIVE
+  PAUSED
+  ERROR
+}
+
+// ==================== ORCHESTRATOR & JOBS ====================
+
+model Goal {
+  id          String   @id @default(cuid())
+  userId      String
+  projectId   String?
+  
+  // Goal details
+  description String
+  status      GoalStatus @default(PENDING)
+  priority    Int        @default(5)
+  
+  // Decomposition
+  decomposedJobs Json?  // Array of jobs created from this goal
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+  
+  // Relations
+  executions  Execution[]
+  
+  @@index([userId])
+  @@index([status])
+}
+
+enum GoalStatus {
+  PENDING
+  DECOMPOSING
+  EXECUTING
+  COMPLETED
+  FAILED
+  BLOCKED
+}
+
+model Execution {
+  id            String   @id @default(cuid())
+  userId        String
+  agentId       String
+  deploymentId  String?
+  goalId        String?
+  projectId     String?
+  
+  // Execution details
+  input         Json     // What was sent to agent
+  output        Json?    // Agent response
+  status        ExecutionStatus @default(RUNNING)
+  error         String?
+  
+  // Policy & governance
+  policiesChecked String[]  // IDs of policies checked
+  blockedBy     String?     // Policy ID that blocked this
+  
+  // Performance
+  startedAt     DateTime @default(now())
+  completedAt   DateTime?
+  durationMs    Int?
+  tokensUsed    Int?
+  cost          Float?   // in cents
+  
+  // Metadata
+  metadata      Json?
+  
+  // Relations
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agent         Agent    @relation(fields: [agentId], references: [id])
+  deployment    Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  goal          Goal?    @relation(fields: [goalId], references: [id], onDelete: SetNull)
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  
+  @@index([userId])
+  @@index([agentId])
+  @@index([status])
+  @@index([startedAt])
+}
+
+enum ExecutionStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  BLOCKED
+}
+
+// ==================== POLICIES & GOVERNANCE ====================
+
+model Policy {
+  id          String   @id @default(cuid())
+  userId      String
+  projectId   String?
+  
+  // Policy details
+  name        String
+  description String?
+  type        PolicyType
+  conditions  Json     // Conditions that trigger this policy
+  action      PolicyAction @default(BLOCK)
+  
+  // Status
+  active      Boolean  @default(true)
+  severity    PolicySeverity @default(MEDIUM)
+  
+  // Metadata
+  triggeredCount Int    @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  expiresAt   DateTime?
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project     Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  blockedActions BlockedAction[]
+  
+  @@index([userId])
+  @@index([projectId])
+  @@index([active])
+}
+
+enum PolicyType {
+  RATE_LIMIT
+  CONTENT_FILTER
+  APPROVAL_REQUIRED
+  BUDGET_LIMIT
+  TIME_WINDOW
+  CUSTOM
+}
+
+enum PolicyAction {
+  BLOCK
+  WARN
+  REQUIRE_APPROVAL
+}
+
+enum PolicySeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model BlockedAction {
+  id          String   @id @default(cuid())
+  userId      String
+  policyId    String
+  
+  // Action details
+  agentId     String
+  action      Json     // What was attempted
+  reason      String   // Why it was blocked
+  
+  // Resolution
+  status      BlockedActionStatus @default(PENDING)
+  resolvedBy  String?
+  resolvedAt  DateTime?
+  resolution  String?  // approved, rejected, modified
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  environment String   @default("production") // sandbox or production
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  policy      Policy   @relation(fields: [policyId], references: [id], onDelete: Cascade)
+  
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum BlockedActionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+// ==================== PROJECTS ====================
+
+model Project {
+  id          String   @id @default(cuid())
+  userId      String
+  
+  // Project details
+  name        String
+  description String?
+  color       String?
+  icon        String?
+  
+  // Status
+  active      Boolean  @default(true)
+  archived    Boolean  @default(false)
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  deployments Deployment[]
+  policies    Policy[]
+  executions  Execution[]
+  
+  @@index([userId])
+}
+
+// ==================== MEMORY & LEARNING ====================
+
+model Learning {
+  id          String   @id @default(cuid())
+  userId      String
+  agentId     String?
+  
+  // Learning details
+  type        LearningType
+  pattern     Json     // Detected pattern
+  insight     String   // Human-readable insight
+  confidence  Float    // 0-1 confidence score
+  
+  // Source
+  sourceExecutionIds String[] // Executions that led to this learning
+  
+  // Status
+  applied     Boolean  @default(false)
+  verified    Boolean  @default(false)
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([userId])
+  @@index([type])
+}
+
+enum LearningType {
+  SUCCESS_PATTERN
+  FAILURE_PATTERN
+  PERFORMANCE_TIP
+  ROUTING_PREFERENCE
+  POLICY_TRIGGER
+}
+
+// ==================== INTEGRATIONS ====================
+
+model Connection {
+  id          String   @id @default(cuid())
+  userId      String
+  
+  // Connection details
+  service     String   // twitter, slack, google, etc.
+  accountName String?  // Username or account identifier
+  status      ConnectionStatus @default(ACTIVE)
+  
+  // OAuth tokens (encrypted)
+  accessToken String?
+  refreshToken String?
+  expiresAt   DateTime?
+  
+  // Permissions
+  scopes      String[]
+  
+  // Metadata
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  lastUsedAt  DateTime?
+  
+  // Relations
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([userId, service])
+  @@index([userId])
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  ERROR
+}
+
+// ==================== NOTIFICATIONS ====================
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  
+  // Notification details
+  type      String   // blocked_action, execution_failed, policy_triggered
+  title     String
+  message   String
+  link      String?
+  
+  // Status
+  read      Boolean  @default(false)
+  dismissed Boolean  @default(false)
+  
+  // Metadata
+  createdAt DateTime @default(now())
+  readAt    DateTime?
+  
+  @@index([userId])
+  @@index([read])
+}
+
+// ==================== API KEYS ====================
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  userId    String
+  
+  // Key details
+  name      String
+  key       String   @unique // Hashed
+  prefix    String   // First 8 chars for display
+  
+  // Permissions
+  scopes    String[]
+  
+  // Status
+  active    Boolean  @default(true)
+  expiresAt DateTime?
+  lastUsedAt DateTime?
+  
+  // Metadata
+  createdAt DateTime @default(now())
+  
+  @@index([key])
+  @@index([userId])
+}
